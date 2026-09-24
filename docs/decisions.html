@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Caseware — Decision Log</title>
+<style>
+  :root {
+    --bg: #fafaf8; --card: #ffffff; --text: #1f2328; --muted: #656d76; --line: #e3e3de;
+    --accent: #1f5fa8; --ok: #1a7f37; --ok-bg: #e6f4ea; --warn: #9a6700; --warn-bg: #fff4d6;
+    --no: #b42318; --pend: #656d76; --pend-bg: #eeeeea; --code-bg: #f3f3ef;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181c; --card: #1e2126; --text: #e6e6e6; --muted: #9aa1a9; --line: #30343a;
+      --accent: #6ea8ff; --ok: #56d364; --ok-bg: #16301f; --warn: #e3b341; --warn-bg: #3a2e10;
+      --no: #ff7b72; --pend: #9aa1a9; --pend-bg: #2a2d33; --code-bg: #25282e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 1.7rem; margin: 0 0 4px; }
+  h2 { font-size: 1.25rem; margin: 40px 0 12px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+  h3 { font-size: 1.05rem; margin: 0; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px;
+        padding: 12px 14px; overflow-x: auto; font: 12.5px/1.45 ui-monospace, Consolas, monospace; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  .scroll { overflow-x: auto; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  blockquote { margin: 8px 0; padding: 6px 12px; border-left: 3px solid var(--accent);
+               color: var(--muted); font-style: italic; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+          padding: 18px 20px; margin: 14px 0; }
+  .head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .id { font-weight: 700; color: var(--accent); }
+  .badge { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; }
+  .b-ok { background: var(--ok-bg); color: var(--ok); }
+  .b-warn { background: var(--warn-bg); color: var(--warn); }
+  .b-pend { background: var(--pend-bg); color: var(--pend); }
+  .label { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+           color: var(--muted); margin: 14px 0 4px; }
+  .yes { color: var(--ok); font-weight: 600; }
+  .no { color: var(--no); font-weight: 600; }
+  ul { margin: 4px 0; padding-left: 20px; }
+  .open { background: var(--warn-bg); border-radius: 8px; padding: 10px 14px; margin-top: 12px; }
+  details summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Decision Log</h1>
+  <p class="sub">Caseware take-home · Pending product-template updates · Updated 2026-09-24</p>
+
+  <h2>1. The problem</h2>
+  <p>Caseware publishes <b>product templates</b> (one per product) shared by every firm; new versions ship roughly once a week.
+     Each <b>firm</b> has hundreds of <b>engagement files</b>, and each engagement was created from <b>one template at one version</b>.
+     Users need to see <b>which engagements have a pending update</b> and a <b>human-readable summary</b> to decide whether to apply or decline it.</p>
+
+  <div class="scroll"><pre>
+  CASEWARE (shared)                       EACH FIRM (its own database)
+  ─────────────────                       ────────────────────────────
+  Template "Audit Canada"                 Firm "ABC"
+     ├── v1                                  ├── Engagement "Smith 2026"  → Audit Canada  v2
+     ├── v2                                  ├── Engagement "Jones 2026"  → Audit Canada  v4
+     ├── v3                                  └── Engagement "Brown 2026"  → Review Canada v1
+     └── v4  ← latest
+  Template "Review Canada"
+     ├── v1
+     └── v2  ← latest</pre></div>
+
+  <div class="scroll"><table>
+    <tr><th>Engagement</th><th>Template</th><th>Current</th><th>Latest</th><th>Pending?</th></tr>
+    <tr><td>Smith 2026</td><td>Audit Canada</td><td>v2</td><td>v4</td><td class="yes">Yes (v2 → v4, accumulated)</td></tr>
+    <tr><td>Jones 2026</td><td>Audit Canada</td><td>v4</td><td>v4</td><td>No</td></tr>
+    <tr><td>Brown 2026</td><td>Review Canada</td><td>v1</td><td>v2</td><td class="yes">Yes (v1 → v2)</td></tr>
+  </table></div>
+
+  <p><b>The catch:</b> the "Current" column exists, but it lives <i>inside</i> each engagement, and reading it costs ~1 minute per file.</p>
+  <blockquote>"Reading the template information therefore requires loading the engagement, which is a slow operation (~1 minute per file; this should be treated as a hard constraint)."</blockquote>
+  <blockquote>"This database does not currently retain any information about Engagement files, which are stored in their own customer-specific databases."</blockquote>
+  <p>300 engagements × 1 min = 5 hours. We need to know each engagement's version <b>without opening it</b>.</p>
+
+  <h2>2. How key decisions were selected</h2>
+  <p>A decision is key when all three hold: <b>(1)</b> the brief forces it, <b>(2)</b> there are real alternatives, <b>(3)</b> getting it wrong is expensive or breaks a non-functional requirement.
+     <br><span class="sub">Not key: the stack (AWS is given), applying the update (out of scope), screen design (not requested).</span></p>
+
+  <h2>3. Architecture at a glance</h2>
+  <div class="scroll"><pre>
+  EXISTING SYSTEMS              NEW: Pending Updates Service (owns 3 tables)
+  ────────────────              ───────────────────────────────────────────────────
+
+  Template store  ─(listener)─► queue ─► template_releases          (shared, one table:
+                                          template · version · date     no client data)
+
+  Engagement management system ─(hook, same transaction)─► engagement_versions   (per firm DB)
+   create / apply / decline / open / archive                engagement · template · current
+                                                            · declined-up-to · status
+                                                          ► decision_log          (per firm DB)
+
+  Backfill job (one-off) ─(loads each engagement once)─► engagement_versions
+
+  Engagement list screen ── reads ──► pending = engagement_versions compared with template_releases   (no engagement is loaded)
+  On publish             ── diff(previous → new) + touched old sections → LLM summary, stored once
+                            per release and shared by every firm (D5)</pre></div>
+
+  <h2>4. Decisions</h2>
+
+  <!-- D1 -->
+  <div class="card">
+    <div class="head"><span class="id">D1</span><h3>Where "which version is each engagement on" comes from</h3>
+      <span class="badge b-ok">Decided</span></div>
+    <div class="label">Context (brief)</div>
+    <blockquote>"Performance: opening a firm's engagement list, and finding out about a newly published update, cannot depend on loading engagement files synchronously."</blockquote>
+    <blockquote>"You may assume you can add hooks or events to any actions taken by either the product template storage system, or by the engagement management system."</blockquote>
+
+    <div class="label">Options</div>
+    <div class="scroll"><table>
+      <tr><th></th><th>Option</th><th>Verdict</th></tr>
+      <tr><td>A</td><td>Load the files when the user opens the list</td><td class="no">Rejected: hours of waiting; violates the performance requirement</td></tr>
+      <tr><td>B</td><td>Periodically rescan every engagement</td><td class="no">Rejected: 1 min × engagement on every pass, almost all of it redundant; data hours stale</td></tr>
+      <tr><td>C</td><td>Event-fed engagement index + published-versions table + one-time backfill</td><td class="yes">Chosen</td></tr>
+      <tr><td>D</td><td>Change engagement storage so the version is directly queryable</td><td class="no">Rejected for now: invasive change to another system's core; kept as a future improvement</td></tr>
+    </table></div>
+
+    <div class="label">Decision</div>
+    <p>Three small tables owned by a new <b>Pending Updates Service</b>; <b>pending = compare engagement_versions against template_releases</b>, computed every time the list is read.</p>
+    <ul>
+      <li><b>engagement_versions</b> (what version each engagement is on): one row per engagement: template, current version, revision, declined-up-to, status (verifying / verified / error / archived). Written by the backfill and by engagement events; a new release never touches it.</li>
+      <li><b>template_releases</b> (what versions Caseware has published): one row per published template version (template, version, published_at). Changes only when <b>Caseware</b> publishes. A new version never touches engagement_versions: it shows up as pending the next time the list is read.</li>
+      <li><b>decision_log</b> (what the firm has decided): append-only, one row per decision: date, engagement, user, from version, applied-to, reviewed-up-to. engagement_versions says how things are now; decision_log says everything that happened to get there. Queried by engagement, by firm, or by version.</li>
+    </ul>
+    <div class="scroll"><table>
+      <tr><th>Date</th><th>Engagement</th><th>User</th><th>From</th><th>Review</th><th>Decision</th></tr>
+      <tr><td>2026-09-18</td><td>Smith 2026</td><td>ana@abc</td><td>v3</td><td>applied v5, reviewed up to v6</td><td>Applied v5, declined v6</td></tr>
+      <tr><td>2026-10-01</td><td>Smith 2026</td><td>luis@abc</td><td>v5</td><td>applied v7, reviewed up to v7</td><td>Applied v7 (includes v6, previously declined)</td></tr>
+    </table></div>
+    <p>The version of an engagement only changes on create, apply, or decline, and all three go through the engagement system:</p>
+    <blockquote>"The same system which loads engagements is also responsible for handling engagement creation, and for processing the user's accept/decline decision."</blockquote>
+    <div class="scroll"><table>
+      <tr><th>Event</th><th>Source</th><th>Effect</th></tr>
+      <tr><td><code>TemplateVersionPublished(template, v)</code></td><td>Template store</td><td>template_releases: add row</td></tr>
+      <tr><td><code>EngagementCreated(template, v)</code></td><td>Engagement system</td><td>engagement_versions: current = v, verified</td></tr>
+      <tr><td><code>UpdateReviewed(applied_to = k | none, reviewed_up_to)</code></td><td>Engagement system</td><td>engagement_versions: current = k (if applied), declined-up-to = max(declined-up-to, reviewed_up_to) · decision_log: append</td></tr>
+      <tr><td><code>EngagementOpened(template, v)</code></td><td>Engagement system</td><td>engagement_versions: verify for free (the minute was already paid by the user)</td></tr>
+      <tr><td><code>EngagementArchived</code></td><td>Engagement system</td><td>engagement_versions: status = archived (tombstone, not deleted, so a late backfill write cannot resurrect it)</td></tr>
+    </table></div>
+
+    <div class="label">Backfill (existing engagements, one-off)</div>
+    <ol>
+      <li><b>Inventory (cheap):</b> list each firm's engagements (id, name) and insert one row per engagement in engagement_versions with status "Verifying…". That table is the work queue; no separate queue is needed.</li>
+      <li><b>Prioritize:</b> recently opened engagements first; closed engagements from prior years last or excluded.</li>
+      <li><b>Workers (per region):</b> take the next "Verifying…" engagement, load it read-only (~1 min), read the three values it stores (template ID, version, revision), write them with the newer-revision rule, mark it verified. Each worker uses credentials scoped to the firm it is processing (D2). Nothing else is read: the template ID tells which product's releases to compare against, the version is the comparison base, the revision prevents stale overwrites.</li>
+      <li><b>Load control:</b> a global concurrency cap per region, a small per-firm cap (a large firm cannot starve small ones), more workers during each firm's off-hours (its own time zone), and automatic slow-down or pause if user-facing engagement loading degrades.</li>
+      <li><b>Failures:</b> retry with backoff; after 3 attempts the row is marked "Error" and an alarm fires. Progress lives in engagement_versions, so a crash resumes where it stopped. Engagements opened by users in the meantime are verified by <code>EngagementOpened</code> and skipped.</li>
+      <li><b>Tracking:</b> per-firm progress (verified / total / errors) on a dashboard.</li>
+    </ol>
+    <p class="sub">Order of magnitude (assumed: 1,000 firms × 300 engagements, half of them closed): 150,000 loads; 100 concurrent loads → 6,000/hour → ~48,000 per 8-hour night → about 3 nights. Rollout: pilot with a few small firms to measure real load time and user impact, then waves. The same job is reused to onboard new firms and for the sampled drift check.</p>
+    <p>Until an engagement is verified, its row shows only its name, with template and version blank and status <b>"Verifying…"</b>. It is never reported as "up to date", and the engagement itself stays fully usable: only the pending-update column waits.</p>
+    <div class="scroll"><table>
+      <tr><th>Engagement</th><th>Template</th><th>Version</th><th>Status</th></tr>
+      <tr><td>Brown 2026</td><td>—</td><td>—</td><td>⏳ Verifying…</td></tr>
+    </table></div>
+
+    <div class="label">Consequences</div>
+    <ul>
+      <li>(+) The list and its pending updates are computed without loading any engagement file.</li>
+      <li>(+) Publishing a version is one row in template_releases; the cost does not grow with the number of engagements.</li>
+      <li>(−) The index is a copy and can drift; see failure notes below.</li>
+      <li>(−) During the backfill some engagements are in "Verifying…".</li>
+      <li>(−) template_releases duplicates metadata from the template store; it can be dropped if the store already lists versions cheaply.</li>
+    </ul>
+
+    <div class="label">Failure notes</div>
+    <ul>
+      <li><b>Lost update</b> (decision saved, our tables not updated): impossible by construction. The hook inside the engagement management system writes engagement_versions and decision_log in the same transaction as the engagement change, because they live in the same firm database. <i>Changed:</i> an earlier version used an outbox plus a separate event processor; removed as unnecessary once the tables were placed in the firm database (D2).</li>
+      <li><b>Stale overwrite</b> (the backfill reads v3, a user applies v4 during that minute, the backfill then writes v3): every write to engagement_versions carries the engagement's revision number and is applied only if newer. The same rule covers duplicate or out-of-order events.</li>
+      <li><b>Drift detection</b>: a periodic check reloads a small sample of engagements per firm and compares with engagement_versions.</li>
+    </ul>
+
+    <div class="label">Assumptions</div>
+    <ul>
+      <li>Listing a firm's engagements (id, name) is cheap; only reading the template and version inside them is expensive.</li>
+      <li>An engagement can be loaded read-only, with no side effects, for the backfill.</li>
+      <li>Stored engagements carry a revision number or last-modified marker.</li>
+      <li>Closed engagements from prior years do not take template updates, so the backfill can leave them for last.</li>
+      <li>The template store holds each version's full content (inferred: templates are "zip archives of structured JSON data" and engagement creation "retrieve[s] the template file" from it).</li>
+    </ul>
+  </div>
+
+  <!-- D2 -->
+  <div class="card">
+    <div class="head"><span class="id">D2</span><h3>Where engagement_versions and decision_log live and how firm isolation holds end to end</h3><span class="badge b-ok">Decided</span></div>
+    <blockquote>"engagement content is client-confidential, and the pending-update data this feature introduces is derived from a template store shared across every firm. Whatever tracks and surfaces that state must enforce firm-level isolation as a structural property (not just an application-layer filter), must restrict who can see or act on a firm's pending updates to users authorized for that firm, and must respect any data-residency requirements the firm's engagement data is already subject to."</blockquote>
+    <blockquote>"Engagement files, which are stored in their own customer-specific databases."</blockquote>
+
+    <div class="label">What is confidential</div>
+    <p>engagement_versions (which engagements a firm has, i.e. its clients) and decision_log (who decided what) are confidential. template_releases (template, version, date) is Caseware's own data, identical for every firm, and stays shared (D3).</p>
+
+    <div class="label">Options</div>
+    <div class="scroll"><table>
+      <tr><th></th><th>Option</th><th>Verdict</th></tr>
+      <tr><td>A</td><td>One central database, rows keyed by <code>firm_id</code></td><td class="no">Rejected: exactly the application-layer filter the brief rules out; one region for everyone breaks residency</td></tr>
+      <tr><td>B</td><td>New tables inside each firm's existing database</td><td class="yes">Chosen: isolation and residency are inherited from a boundary that already exists</td></tr>
+      <tr><td>C</td><td>A new database per firm for this feature only</td><td class="no">Rejected: same isolation as B, but duplicates per-firm infrastructure</td></tr>
+    </table></div>
+
+    <div class="label">Decision: isolation along the whole path, not only storage</div>
+    <p>The requirement covers "whatever tracks and surfaces that state", so every component that touches firm data works with credentials that can only open that firm's database.</p>
+    <div class="scroll"><table>
+      <tr><th>Component</th><th>Risk</th><th>Structural control</th></tr>
+      <tr><td>Storage (engagement_versions, decision_log)</td><td>Rows of different firms side by side</td><td>Tables live in the firm's own database, in its region</td></tr>
+      <tr><td>Engagement events (create, apply, decline, open)</td><td>A shared queue mixing every firm's events, routed by a <code>firm</code> field</td><td>No queue on the firm side: the hook writes our tables in the firm's own database, in the same transaction as the engagement change. The data never leaves the firm's database</td></tr>
+      <tr><td>Backfill</td><td>One job with access to every database</td><td>Runs per firm with firm-scoped credentials</td></tr>
+      <tr><td>API / engagement list</td><td>A user asks for another firm's data</td><td>The firm is taken from the session token, never from the request; the token only yields that firm's database credentials. Apply/decline reuses the existing per-engagement permissions</td></tr>
+      <tr><td>Caches, logs, metrics</td><td>Engagement names from several firms mixed in a shared sink</td><td>No shared cache of firm data; logs and metrics carry ids and counts only</td></tr>
+      <tr><td>Deployment</td><td>Firm data processed outside its region</td><td>The Pending Updates Service runs in every region that hosts firm databases</td></tr>
+    </table></div>
+
+    <div class="label">One-way flow from shared to per-firm</div>
+    <div class="scroll"><pre>
+  SHARED (Caseware)                            PER FIRM
+  template store,               ─────────►      engagement_versions,
+  template_releases,                            decision_log (confidential)
+  change summaries (D5)
+                               ◄──── ✗  nothing flows back except counts for monitoring</pre></div>
+    <ul>
+      <li>template_releases never learns which firms use which template.</li>
+      <li>Change summaries are generated from the template diff only, with no firm data, so they can be shared.</li>
+    </ul>
+
+    <div class="label">Consequences</div>
+    <ul>
+      <li>(+) Isolation and residency are properties of where the data and the processing live, not of a <code>WHERE</code> clause.</li>
+      <li>(+) Firms scale independently: a large firm does not slow down a small one.</li>
+      <li>(−) The new tables must be migrated into every firm database, rolled out gradually firm by firm.</li>
+      <li>(−) The global view for monitoring is an aggregation of per-firm counts, not a direct query.</li>
+    </ul>
+
+    <div class="label">Assumptions</div>
+    <ul>
+      <li>New tables can be added to each firm's database.</li>
+      <li>Existing per-firm authentication can be reused, and database credentials scoped to a single firm can be obtained.</li>
+    </ul>
+  </div>
+
+  <!-- D3 -->
+  <div class="card">
+    <div class="head"><span class="id">D3</span><h3>How a newly published version reaches the user</h3><span class="badge b-ok">Decided</span></div>
+    <blockquote>"Users need to see at a glance which of their engagement files have pending updates […] provide users with that information in an up-to-date manner"</blockquote>
+    <blockquote>"a single update can affect every firm using that product at once."</blockquote>
+
+    <div class="label">Reading of the requirement</div>
+    <p>"Up-to-date" means the list is correct whenever the user looks at it: a version published minutes ago is already shown as pending.
+       The brief does not ask for active notifications (email, push); they are an optional extension that the same event enables.</p>
+
+    <div class="label">Options</div>
+    <div class="scroll"><table>
+      <tr><th></th><th>Option</th><th>Verdict</th></tr>
+      <tr><td>A</td><td>Fan out on publish: find every affected engagement in every firm and mark it</td><td class="no">Rejected: work grows with the number of engagements; one publish becomes a large cross-firm job</td></tr>
+      <tr><td>B</td><td>Publish hook → queue → one row in template_releases; pending computed on read (engagement_versions compared with template_releases)</td><td class="yes">Chosen</td></tr>
+    </table></div>
+
+    <div class="label">Flow</div>
+    <div class="scroll"><pre>
+  PUBLISH   1. Content team publishes "Audit Canada v5" (template store, as today)
+            2. Hook on the template store emits "Audit Canada v5 published"
+            3. The message waits in a queue (nothing is lost if the consumer is down)
+            4. Pending Updates Service adds a row to template_releases  → seconds, no engagement loaded
+
+  READ      5. A user of Firm ABC opens the engagement list
+            6. The service reads engagement_versions (Smith → Audit Canada v3)
+               and template_releases (latest v5)
+            7. v3 &lt; v5  →  "Smith 2026: 2 pending updates"
+
+  DECIDE    8. The user applies or declines (engagement system, as today)
+            9. In the same transaction, the hook sets engagement_versions (Smith → v5)
+               and appends to decision_log</pre></div>
+
+    <div class="label">Consequences</div>
+    <ul>
+      <li>(+) Publishing costs one row, regardless of how many firms or engagements use the template.</li>
+      <li>(+) There is no ordering problem: a version published before an engagement is verified is already in template_releases and shows up as soon as engagement_versions knows the real version.</li>
+      <li>(+) template_releases holds no client data (template, version, date), so a single shared table is enough; only engagement_versions and decision_log are per firm (D2).</li>
+      <li>(−) The user only sees a new version when they look at the list; there is no active alert unless the optional notification is added.</li>
+      <li>(−) A lost or delayed publish message would hide a version: the queue retries, and an alarm fires if template_releases falls behind the template store.</li>
+    </ul>
+
+    <div class="label">Change (2026-09-24): seed template_releases at launch</div>
+    <p>Found in review: template_releases is new and starts empty, and the hook only reports versions published after it is enabled. Every version already in the template store at launch would be missing, so an engagement on v3 with v4 already published would show "Up to date", and v5's summary (diffed against v4) would hide v4's changes.
+       Fix: when the hook is enabled, copy the list of existing versions from the template store into template_releases once (through the same queue, so processing stays idempotent on template + version). It must finish before the read API is enabled; it does not need to finish before the backfill, because pending is computed on read. It is fast: the template store is quick to read, and no engagement is loaded.</p>
+
+    <div class="label">Assumptions</div>
+    <ul>
+      <li>The template store can list the existing versions of each template (the brief only states retrieval "given a template ID and a version"; the reconciliation alarm already relies on this).</li>
+    </ul>
+    <p class="sub">The concrete AWS messaging service is an implementation choice, deferred.</p>
+  </div>
+
+  <!-- D4 -->
+  <div class="card">
+    <div class="head"><span class="id">D4</span><h3>Accumulated updates and what "decline" means</h3><span class="badge b-ok">Decided</span></div>
+    <blockquote>"Consider how to handle the scenario where multiple template updates accumulate before the user makes the accept/decline choice."</blockquote>
+
+    <div class="label">Options</div>
+    <div class="scroll"><table>
+      <tr><th></th><th>Option</th><th>Verdict</th></tr>
+      <tr><td>A</td><td>One decision per version, oldest first</td><td class="no">Rejected: forces the user through intermediate versions that no longer matter</td></tr>
+      <tr><td>B</td><td>One accumulated decision to the latest; declining walks back one version at a time</td><td class="yes">Chosen</td></tr>
+    </table></div>
+
+    <div class="label">Decision</div>
+    <ul>
+      <li><b>Which versions are pending:</b> floor = max(current, declined-up-to); pending = template_releases rows for the engagement's template with version &gt; floor. Ordered by version number (dates are for display only).</li>
+      <li><b>One review covers all pending versions.</b> The user either applies up to a version k (default: the latest) or declines all. Declining the latest walks the UI back one version at a time so the user can stop at k. Walking backwards is the only valid order: versions are cumulative, so v5 cannot be applied without v4, but the engagement can stop at v4.</li>
+      <li><b>Recorded once:</b> the whole review is one event, <code>UpdateReviewed(applied_to = k | none, reviewed_up_to = latest pending)</code>. Intermediate walk-back steps are UI only, so nothing is lost if the user leaves mid-review.</li>
+      <li><b>Comparison base:</b> always the engagement's real current version. The summary for target k lists every version in (current, k] and flags those at or below declined-up-to as previously declined.</li>
+      <li><b>declined-up-to</b> is a watermark that only rises (<code>max()</code>). Only versions above it are pending, so a declined version is not offered again. Declines live only in our tables; the backfill never touches them.</li>
+    </ul>
+
+    <div class="label">Example</div>
+    <div class="scroll"><pre>
+  Smith 2026 is on v3. v4 and v5 are published.
+    "Apply v3 → v5?"   Decline →  "Apply v3 → v4?"   Approve
+    → one event: applied_to = v4, reviewed_up_to = v5  →  current = v4, declined-up-to = v5
+
+  v6 is published (built on v5, so it carries v5's changes).
+    floor = max(v4, v5) = v5, so only v6 is pending. Compared from the real version: v4 → v6.
+    ▸ New in v6
+    ▸ Previously declined (v5), would be included
+    Decline →  declined-up-to = v6; v5 is not offered again.</pre></div>
+
+    <div class="label">Consequences</div>
+    <ul>
+      <li>(+) One click in the common case (accept everything); full control when declining.</li>
+      <li>(−) Declining across many accumulated versions can take several steps.</li>
+      <li>(−) Applying a newer version brings back previously declined changes; the summary must make that explicit.</li>
+      <li>The watermark drives the logic; decision_log answers "what has this firm decided over time".</li>
+    </ul>
+    <div class="label">Assumptions</div>
+    <ul><li>Version numbers increase monotonically per template.</li></ul>
+  </div>
+
+  <!-- D5 -->
+  <div class="card">
+    <div class="head"><span class="id">D5</span><h3>How the human-readable summary is generated</h3><span class="badge b-ok">Decided</span></div>
+    <blockquote>"You can assume that you have access to a quick and reliable way to compare two different versions of the same Product Template and extract a JSON diff. However, the users are non-technical and would strongly prefer something human-readable."</blockquote>
+
+    <div class="label">Options</div>
+    <div class="scroll"><table>
+      <tr><th></th><th>Option</th><th>Verdict</th></tr>
+      <tr><td>A</td><td>Show the raw JSON diff</td><td class="no">Rejected: users are non-technical</td></tr>
+      <tr><td>B</td><td>Deterministic rules per change type</td><td class="no">Rejected: requires knowing the internal template schema, which we do not; brittle as templates evolve</td></tr>
+      <tr><td>C</td><td>LLM summary grounded in the old template + the diff, with deterministic checks only where they are obvious</td><td class="yes">Chosen</td></tr>
+    </table></div>
+
+    <div class="label">Decision</div>
+    <ul>
+      <li><b>When:</b> at publish time (not on demand), once per version against the previous one (v4 → v5), inside the publish flow (D3). Nobody waits, the content team can review before customers see it, and cost is one LLM call per release. Until a summary is ready or approved, the update still shows as pending with "Summary in preparation".</li>
+      <li><b>Accumulated versions (option A, chosen):</b> a user on v3 sees the v4 and v5 summaries in order; a user on v4 sees only v5. Both read the same stored rows. Elements changed in more than one pending version are flagged "changed again in v5" by comparing diff paths (deterministic, no LLM). Rejected option B: a net summary per (from, to) pair generated on demand, because users would wait, pairs multiply, and the content team could not review them in advance.</li>
+      <li><b>Storage:</b> <code>release_summaries</code>, one row per published version: template, version, from-version, summary text, exact change list (C1, C2…), review status, model and prompt version, generated-at. Shared by every firm (no client data). The "previously declined" label is computed at read time from each engagement's watermark, not stored.</li>
+      <li><b>Input:</b> the JSON diff plus only the sections of the old template that the diff touches (extracted by following each change's path), so the model can name things ("procedure 12" → "Lease review") without reading the whole archive.</li>
+      <li><b>Grounding check (the only deterministic step):</b> each diff entry gets an ID (C1, C2…); the summary must cite them. Code verifies that no cited ID is invented and that every change is covered. On failure: regenerate once, then route to human review.</li>
+      <li><b>Presentation:</b> labelled "AI-generated"; the model never recommends apply or decline.</li>
+      <li><b>Data boundary:</b> the model only sees Caseware template content, never firm data (D2).</li>
+    </ul>
+
+    <div class="label">Rollout and evaluation</div>
+    <ol>
+      <li><b>Before production:</b> generate summaries for real historical publications (all versions are stored); the content team grades them. That set becomes the regression suite for any prompt or model change.</li>
+      <li><b>Launch:</b> the content team approves each summary before customers see it (~one per product per week).</li>
+      <li><b>Steady state:</b> sampled review plus user feedback, once measured quality is consistently high.</li>
+    </ol>
+
+    <div class="label">Consequences</div>
+    <ul>
+      <li>(+) Readable summaries without encoding the template schema in rules.</li>
+      <li>(+) Cost is tiny: one generation per publication, not per firm or engagement.</li>
+      <li>(−) Non-deterministic output: mitigated by the citation check, the evaluation set, and human review at launch.</li>
+      <li>(−) The citation check proves coverage, not correctness of wording; that is what human review and the evaluation set are for.</li>
+    </ul>
+  </div>
+
+  <!-- D6 -->
+  <div class="card">
+    <div class="head"><span class="id">D6</span><h3>Rollout order, exit criteria and operational thresholds</h3><span class="badge b-ok">Decided</span></div>
+    <blockquote>"Whatever you propose has to hold up under real usage, not just work in a demo with a handful of engagements."</blockquote>
+    <blockquote>"you should be able to tell, without waiting for a user to report it, how many engagements are affected by a newly published update, whether the pending-update check is actually running for every firm, and what a firm's history of apply/decline decisions has been."</blockquote>
+
+    <div class="label">Context</div>
+    <p>Review against common design-doc practice (online migrations: expand → capture changes → backfill → verify → cut over; FMEA-style failure tables with detection; three-layer LLM evaluation) found that the plan had no exit criteria, overlapping steps 1–2, no verification before users see the data, and that tests, alerts and failure modes lacked concrete thresholds and detection.</p>
+
+    <div class="label">Decision</div>
+    <ul>
+      <li><b>Plan order:</b> tables → capture new changes (engagement hook, listener, launch copy of existing versions) → backfill → verify hidden (pending computed but not shown, drift sample) → show to users (pilot, then waves). Summaries run in parallel. Each phase has a "done when" criterion; rollback is the per-firm flag (only additive tables and hooks).</li>
+      <li><b>Why capture before backfill:</b> the backfill reads a snapshot; any create/apply/decline during it must already be written by the hook (in the firm's own database) or it would be lost.</li>
+      <li><b>Reconciliation</b> (D3) no longer only alarms: it copies missing versions into template_releases, the same mechanism as the launch copy.</li>
+      <li><b>Failure table</b> gains "effect" and "detected by"; "impossible by construction" replaced by the explicit flip side: our write shares the engagement transaction, so a failure on our side fails the user's action. Recorded as a tradeoff.</li>
+      <li><b>LLM vs. rule-based summaries</b> added to the tradeoff list (from D5).</li>
+      <li>The "double submission" row was dropped from design.md for length; the behaviour stands: reviews are idempotent on (engagement, reviewed_up_to, revision).</li>
+    </ul>
+
+    <div class="label">Consequences</div>
+    <ul>
+      <li>(+) Every phase is independently deployable, verifiable and reversible.</li>
+      <li>(−) The hidden verification phase delays what users see by the drift-check window.</li>
+      <li>(−) The thresholds below are starting points, not measured values; the pilot should recalibrate them.</li>
+    </ul>
+
+    <div class="label">Assumptions</div>
+    <ul>
+      <li>Sizing: 1,000 firms × 150 open engagements, 100 concurrent loads (same as D1).</li>
+      <li>Thresholds (when the backfill counts as done, how long the pilot runs, when summaries move to sampled review, alert limits) are set during the pilot; the brief gives none. Change (2026-09-24): the specific values first written here (99%, 2 weeks, 20 releases, 15 min, 24 h, 7 days) were invented and removed from design.md.</li>
+      <li>Change (2026-09-24): the list latency target (p95 300 ms) was removed from the testing section and the alerts, because the brief gives no number. The criterion used instead is the brief's: the list never loads an engagement and its response time does not grow with firm size. The testing section was reorganized per component at strategy level ("Optimize for clarity and tradeoffs over completeness").</li>
+      <li>Change (2026-09-24, interviewer-style review of sections 4–5): the post-publish count job runs per region with each firm's own credentials and exports only counts (answers residency, isolation and the apparent conflict with an O(1) publish); the drift check is named as what catches a broken hook; decision history lists who, when, from and to; hook write errors added to alerts; a feature-usefulness signal added (time from publish to decision, long-pending engagements); a cross-firm leak failure row added; the backfill's one-time cost added as a tradeoff.</li>
+      <li>Change (2026-09-24): section 4 reorganized per component (what we watch, when it alarms), with the brief's three observability questions answered inside the relevant rows, plus an evaluation paragraph for summaries and for the feature itself. Reason: the section should show how the system we built is observed and evaluated, not only list the brief's questions.</li>
+      <li>Change (2026-09-24): section 4 rewritten to measure correctness, not only liveness. Reason (review feedback): the previous version watched latency, queues and the citation check, which prove a component is running, not that it is right. Now each component states what doing its job right means and how that is measured in production (reconciliation, an end-to-end drift check of pending updates, log completeness), and summaries are evaluated against four criteria (complete, faithful, clear, neutral) by content-team grading and confirmed user flags.</li>
+      <li>Change (2026-09-24): to stay within 3 pages, the failure rows "LLM down" (covered by the <i>Summary in preparation</i> state, §1) and "backfill slows users" (covered by the plan's caps and back-off, and by backfill monitoring) were dropped from design.md; the behaviour stands.</li>
+      <li>Change (2026-09-24): decision_log also records which summary version (release_summaries row and its revision) the user saw when deciding. Reason: if a summary is later found wrong, the decisions that relied on it and the firms to notify can be identified (brief: "Investigate and explain findings with traceability and confidence", "document defensible conclusions"). Section 5 rewritten in plain language: the summary failure now covers wrong meaning (not detectable by the citation check), and a "diff too large for the LLM" failure was added.</li>
+      <li>Clarification (2026-09-24): decision_log stores only references (summary IDs and revisions), not summary text; the text stays in release_summaries, which keeps every revision instead of overwriting. Without the revision, a decision taken on a summary that was later corrected could not be told apart from one taken on the corrected text.</li>
+      <li>Change (2026-09-24): the summary reference in decision_log was removed as redundant. release_summaries keeps every revision with its date, and decision_log already records when each decision was taken, so the decisions made while a wrong revision was live are found by comparing dates.</li>
+    </ul>
+  </div>
+</main>
+</body>
+</html>
