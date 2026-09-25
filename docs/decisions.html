@@ -90,7 +90,7 @@
 
   <h2>3. Architecture at a glance</h2>
   <div class="scroll"><pre>
-  EXISTING SYSTEMS              NEW: Pending Updates Service (owns 3 tables)
+  EXISTING SYSTEMS              NEW: Pending Updates Service (owns 4 tables)
   ────────────────              ───────────────────────────────────────────────────
 
   Template store  ─(listener)─► queue ─► template_releases          (shared, one table:
@@ -127,7 +127,7 @@
     </table></div>
 
     <div class="label">Decision</div>
-    <p>Three small tables owned by a new <b>Pending Updates Service</b>; <b>pending = compare engagement_versions against template_releases</b>, computed every time the list is read.</p>
+    <p>Three small tables (a fourth, release_summaries, is added in D5) owned by a new <b>Pending Updates Service</b>; <b>pending = compare engagement_versions against template_releases</b>, computed every time the list is read.</p>
     <ul>
       <li><b>engagement_versions</b> (what version each engagement is on): one row per engagement: template, current version, revision, declined-up-to, status (verifying / verified / error / archived). Written by the backfill and by engagement events; a new release never touches it.</li>
       <li><b>template_releases</b> (what versions Caseware has published): one row per published template version (template, version, published_at). Changes only when <b>Caseware</b> publishes. A new version never touches engagement_versions: it shows up as pending the next time the list is read.</li>
@@ -176,9 +176,9 @@
 
     <div class="label">Failure notes</div>
     <ul>
-      <li><b>Lost update</b> (decision saved, our tables not updated): impossible by construction. The hook inside the engagement management system writes engagement_versions and decision_log in the same transaction as the engagement change, because they live in the same firm database. <i>Changed:</i> an earlier version used an outbox plus a separate event processor; removed as unnecessary once the tables were placed in the firm database (D2).</li>
+      <li><b>Lost update</b> (decision saved, our tables not updated): prevented while assumption 4 of design.md holds. The hook inside the engagement management system writes engagement_versions and decision_log in the same transaction as the engagement change, because they live in the same firm database. <i>Changed:</i> an earlier version used an outbox plus a separate event processor; removed as unnecessary once the tables were placed in the firm database (D2). <i>Changed (2026-09-24):</i> "impossible by construction" dropped (see D6); if the engagement store cannot share a transaction with our tables, Plan B applies (D7).</li>
       <li><b>Stale overwrite</b> (the backfill reads v3, a user applies v4 during that minute, the backfill then writes v3): every write to engagement_versions carries the engagement's revision number and is applied only if newer. The same rule covers duplicate or out-of-order events.</li>
-      <li><b>Drift detection</b>: a periodic check reloads a small sample of engagements per firm and compares with engagement_versions.</li>
+      <li><b>Drift detection</b>: a periodic check reloads a small sample of engagements per firm and compares with engagement_versions (called the <i>spot check</i> in design.md, D7).</li>
     </ul>
 
     <div class="label">Assumptions</div>
@@ -422,6 +422,38 @@
       <li>Change (2026-09-24): decision_log also records which summary version (release_summaries row and its revision) the user saw when deciding. Reason: if a summary is later found wrong, the decisions that relied on it and the firms to notify can be identified (brief: "Investigate and explain findings with traceability and confidence", "document defensible conclusions"). Section 5 rewritten in plain language: the summary failure now covers wrong meaning (not detectable by the citation check), and a "diff too large for the LLM" failure was added.</li>
       <li>Clarification (2026-09-24): decision_log stores only references (summary IDs and revisions), not summary text; the text stays in release_summaries, which keeps every revision instead of overwriting. Without the revision, a decision taken on a summary that was later corrected could not be told apart from one taken on the corrected text.</li>
       <li>Change (2026-09-24): the summary reference in decision_log was removed as redundant. release_summaries keeps every revision with its date, and decision_log already records when each decision was taken, so the decisions made while a wrong revision was live are found by comparing dates.</li>
+    </ul>
+  </div>
+  <!-- D7 -->
+  <div class="card">
+    <div class="head"><span class="id">D7</span><h3>Review for clarity, coherence and completeness</h3><span class="badge b-ok">Decided</span></div>
+    <blockquote>"What We're Evaluating: [...] Clarity of communication"</blockquote>
+    <blockquote>"You may choose any cloud provider or stack (note we are an AWS shop)"</blockquote>
+    <blockquote>"Optionally (but encouraged), implement one small slice of the system. [...] Focus on interfaces, contracts, and correctness. Tests or validation logic are a plus"</blockquote>
+    <blockquote>"Please provide a short design document (1–3 pages max)"</blockquote>
+
+    <div class="label">Context</div>
+    <p>A full read of the submission as a reviewer would see it (2026-09-24) found: the rendered PDF had spilled onto a 4th page; sections 4–5 used internal names never explained (drift check, post-publish count job, reconciliation, citation check); the §1 example said v6's summary "also lists v5's changes", which contradicts one summary per version; the monitoring jobs were used in §4 but missing from the component table and the diagram, which also lacked the user's apply/decline; no AWS service was named; the design rested on assumption 4 (shared transaction) with no fallback; Part 2 was not done.</p>
+
+    <div class="label">Decision</div>
+    <ul>
+      <li><b>Plain names, defined once</b> in the component table: <i>version check</i> (was reconciliation), <i>spot check</i> (was drift check), <i>impact count</i> (was post-publish count job), <i>ID check</i> (was citation check). No decision changes; only wording.</li>
+      <li><b>Example corrected:</b> when v6 ships after v5 was declined, the review shows v5's summary (marked <i>previously declined, would be included</i>) and v6's. The v6 summary itself only covers v5 → v6 (D5 unchanged).</li>
+      <li><b>Monitoring jobs</b> added to the component table and to architecture.svg, with the user's apply/decline arrow.</li>
+      <li><b>AWS mapping</b> added as a column: EventBridge + SQS (queue), Lambda (release processor, summary generator, monitoring), API Gateway + Lambda in each region (Pending Updates API), Bedrock (LLM), ECS tasks (backfill), CloudWatch (metrics, alarms), shared tables replicated per region (e.g. DynamoDB global tables). Illustrative, not a key decision (section 2: the stack is given); the firm tables stay in each firm's existing database, whatever its engine.</li>
+      <li><b>Plan B for assumption 4:</b> if the engagement store cannot share a transaction with our tables, the hook sends each change as a message after the save, retried until stored; the revision rule (D1) makes late or repeated messages harmless and the spot check catches anything missed. This is the outbox removed in D1, kept only as the fallback.</li>
+      <li><b>Two gaps closed as assumptions/behaviour:</b> a published version is never withdrawn (a correction ships as a new version); the review opens once the summaries are ready, so nobody decides on <i>Summary in preparation</i>.</li>
+      <li><b>Part 2 implemented</b> (implementation/): the pending rule of D4 (list status, review offers, decision, stale-reading rule of D1, ID check of D5) as pure functions, written test-first; 26 tests including one that replays 500 random histories.
+        <br><b>Changed after a code review (2026-09-24), no decision changed:</b> the code had drifted from two rules already recorded here. (1) <code>decide</code> stored <code>row.revision + 1</code> instead of the engagement's own revision; plain saves never reach our table, so a late backfill reading (D1) could win and move the engagement back a version. (2) It set <i>reviewed up to</i> to the latest published version at the moment of the click, not the latest one the review showed (the <code>UpdateReviewed(applied_to, reviewed_up_to)</code> event above), so a version published while the review was open was declined unseen. Both reproduced with failing tests first, then fixed; the random-history test now also models plain saves, late readings and publications during a review. 32 tests.</li>
+      <li><b>Page limit:</b> the PDF is rebuilt at a slightly smaller type size so all 5 sections fit in 3 pages.</li>
+    </ul>
+
+    <div class="label">Consequences</div>
+    <ul>
+      <li>(+) A reader outside the design sessions can follow sections 4–5 and the diagram shows every component the text uses.</li>
+      <li>(+) The core rule is backed by test output, not only prose.</li>
+      <li>(−) The PDF type is small (8.6 pt) to keep 3 pages.</li>
+      <li>(−) Plan B reintroduces a delay between the user's decision and our tables; the spot check is what shows whether it matters in practice.</li>
     </ul>
   </div>
 </main>

@@ -1,20 +1,18 @@
 # Pending Template Updates — Design
 
-Options, rationale and worked examples per decision: [`decisions.html`](decisions.html). How AI was used and checked: [`ai-usage.md`](ai-usage.md).
-
 ## The core problem
 
 Users need to see which of their engagements have pending template updates, and what those updates change. The difficulty is that the template version an engagement is on is stored only inside the engagement file, and reading it means loading the file (~1 minute, a hard constraint). The template store, shared by all firms, knows nothing about engagements.
 
-So the design keeps a small table per firm recording which template and version each engagement is on. A one-time background job (the *backfill*) fills it by loading every existing engagement once; hooks in the engagement management system keep it current from then on. Every user-facing question is answered from that table and the list of published versions, so no engagement is ever loaded while a user waits.
+So the design keeps a small table per firm recording which template and version each engagement is on. A one-time background job (the *backfill*) fills it by loading every existing engagement once; code added to the engagement management system keeps it current from then on. Every user-facing question is answered from that table and the list of published versions, so no engagement is ever loaded while a user waits.
 
 ## Key assumptions
 
 1. Listing a firm's engagements (id, name) is cheap; only reading template/version inside them is slow.
-2. An engagement can be loaded just to read its template ID and version, without locking, saving or otherwise changing the client's file (it still takes ~1 min); the stored engagement exposes a revision number.
-3. The only ways an engagement's template version changes are creating it and applying an update; both go through the engagement management system (as do declines), so updating our tables from inside those actions is enough to keep them correct.
-4. Tables can be added to each firm's existing database; the engagement management system can write to them in the same transaction as the engagement change; firm-scoped credentials can be issued.
-5. Versions are numbered monotonically and are cumulative (v5 contains v4's changes); the engagement management system can apply any intermediate version; the template store can list each template's versions.
+2. An engagement can be loaded just to read its template ID and version without changing the client's file (still ~1 min); it carries a *revision number* that increases on every save.
+3. An engagement's template version changes only when it is created or an update is applied; both go through the engagement management system (as do declines), so updating our tables from inside those actions keeps them correct.
+4. Tables can be added to each firm's existing database and the engagement management system can write them in the same transaction as the engagement change (if not, see *Plan B* in §5); firm-scoped credentials can be issued.
+5. Versions are numbered in order and are cumulative (v5 contains v4's changes); any intermediate version can be applied; the template store can list each template's versions. A published version is never withdrawn: a correction ships as a new version.
 6. Closed engagements from prior years do not take template updates.
 7. "Up-to-date" means correct whenever the user looks; push notifications are an optional extension.
 
@@ -26,22 +24,23 @@ So the design keeps a small table per firm recording which template and version 
 
 - **At a glance.** Each engagement in the list shows *Up to date*, *N updates pending* or *Verifying…* (its version is not known yet; the engagement itself stays fully usable).
 - **What counts as pending.** Any published version of the engagement's template that is newer than the version it is on and newer than anything the user already declined.
-- **Accumulated versions, one review.** The user applies everything up to the latest version, or declines; declining offers the previous version, so the user can stop at an intermediate one (versions build on each other: v4 can be taken without v5, not the reverse). A declined version is not offered again.
-- **Summaries.** One per version, shown in order: a user on v3 reads what v4 changed, then what v5 changed; a user on v4 reads only v5. Items changed in more than one pending version are marked *changed again*. Summaries are labelled *AI-generated*, never recommend apply or decline, and show *Summary in preparation* until ready.
+- **Accumulated versions, one review.** The user applies everything up to the latest version in one step. If they decline the latest, they are offered the one before it, so they can take v4 and skip v5 (versions build on each other: v4 can be taken without v5, not the reverse). A declined version is not offered again.
+- **Summaries.** One per version, shown in order: a user on v3 reads what v4 changed, then what v5 changed. Items changed in more than one of them are marked *changed again*. Summaries are labelled *AI-generated* and never recommend apply or decline. Until a summary is ready the update shows as pending with *Summary in preparation*, and the review opens once it is.
 - **History.** Every apply/decline is recorded: who, when, from which version, to which.
 
-*Example:* an engagement on v3; v4 and v5 are published → *2 updates pending*. The user declines v5 and applies v4 → the engagement is on v4 and v5 is not offered again. v6 ships → *1 update pending*; because v6 builds on v5, its summary also lists v5's changes as *previously declined, would be included*.
+*Example:* an engagement on v3; v4 and v5 are published → *2 updates pending*. The user declines v5 and applies v4 → the engagement is on v4 and v5 is not offered again. v6 ships → *1 update pending*; because v6 builds on v5, the review shows v5's summary too, marked *previously declined, would be included*, followed by v6's.
 
 ### How it is built
 
-| Component | What it does |
-|---|---|
-| Queue | Keeps each "new version published" message from the template store until it is processed; retries on failure. |
-| Release processor | Records each new version and requests its summary. |
-| Summary generator | Writes the human-readable summary of each new version (LLM, see below). |
-| Engagement hook | Code added to the engagement management system's create / apply / decline / open / archive actions; updates our tables in the same database transaction. |
-| Backfill job | Loads each existing engagement once (~1 min) to record its template and version. |
-| Pending Updates API | Serves the engagement list by comparing version numbers. |
+| Component | What it does | On AWS |
+|---|---|---|
+| Queue | Holds each "new version published" message from the template store until processed; retries on failure | EventBridge rule → SQS |
+| Release processor | Records each new version and requests its summary | Lambda |
+| Summary generator | Writes the human-readable summary of each new version (see below) | Lambda + Bedrock (LLM) |
+| Engagement hook | Code added to the engagement management system's create / open / apply / decline / archive actions; updates our tables in the same transaction. Opening already loads the engagement, so its version is recorded at no extra cost | New code inside the existing system (no new AWS service) |
+| Backfill job | Loads each existing engagement once (~1 min) to record its template and version | ECS tasks per region |
+| Pending Updates API | Serves the engagement list by comparing version numbers | API Gateway + Lambda, each region |
+| Monitoring jobs | *Version check*: compares our list of versions with the template store's and adds any missing. *Spot check*: opens a few random engagements per firm in the background and compares their real version with our table. *Impact count*: after each publish, counts per firm the engagements it leaves pending | Scheduled Lambdas + CloudWatch |
 
 ![Architecture](architecture.svg)
 
@@ -49,40 +48,34 @@ So the design keeps a small table per firm recording which template and version 
 |---|---|---|
 | `engagement_versions` | Which template and version each engagement is on, and what the user has declined | Each firm's database |
 | `decision_log` | Every apply/decline decision (append-only) | Each firm's database |
-| `template_releases` | Every published version of every template | Shared (no client data) |
-| `release_summaries` | The summary of each published version and its review status; corrections add a dated revision, never overwrite | Shared (no client data) |
+| `template_releases` | Every published version of every template | Shared, copied to each region (no client data; e.g. DynamoDB global table) |
+| `release_summaries` | Each version's summary and review status; a correction adds a dated revision, never overwrites | Same as above |
 
-**Flows**
+**Summary generation (at publish time).** (1) The diff tool compares the new version with the previous one; each change gets an ID (C1, C2…). (2) The LLM receives the changes and, as context, only the parts of the previous version they touch, so it can name things ("procedure 12" is "Lease review"); the whole template would add cost and noise. (3) It writes the summary citing the change IDs. (4) *ID check* (code): every change is cited and no cited ID is invented; otherwise one retry, then human review. *Changed again* is computed by code from the paths each version changed. Rules per change type were rejected: we do not know the template's internal structure.
 
-1. **A new version is published.** Listener on the template store → queue → release processor records it in `template_releases` → summary generator stores its summary in `release_summaries`. One row and one summary per release, however many firms use the template; if we are down, the message waits.
-2. **A user opens the list.** The API reads the firm's `engagement_versions` and `template_releases` and compares version numbers: a database query, no engagement is loaded.
-3. **A user creates, applies or declines.** The engagement hook updates `engagement_versions` and `decision_log` in the same transaction as the engagement change. No queue here: the tables share the firm's database, so the write is all-or-nothing and client data never leaves it. (A database listener would not work: engagements are opaque records.)
-4. **Existing engagements.** Engagements created before launch have no events, so their version is unknown. The backfill job loads each one once (~1 min) and records its template and version. If a user opens one first, the engagement management system is already loading it, so the hook records its version at no extra cost and the backfill skips it.
-
-**Summary generation (at publish time).** (1) The diff tool compares the new version with the previous one; each change gets an ID (C1, C2…). (2) The LLM receives two inputs: **the changes**, and **as context, the parts of the previous version that those changes touch** — so it can name things ("procedure 12" is "Lease review") and explain them. The whole template is not sent: it can be very large, and unchanged parts add cost and noise. (3) The LLM writes the summary, citing the change IDs. (4) Code checks that no cited ID is invented and every change is cited; otherwise it retries once, then sends the summary to human review. The *changed again* mark is computed by code, by comparing the paths each version changed. Rules per change type were rejected: the template's internal structure is unknown to us.
-
-**Security.** `engagement_versions` and `decision_log` reveal a firm's clients and activity, so they live inside each firm's existing database and inherit its isolation and data residency. The backfill job uses firm-scoped credentials; the API takes the firm from the session token, never from the request, and reuses existing per-engagement permissions; logs carry IDs only; the service runs in every region that hosts firm data. Only template data is shared; monitoring exports aggregated counts.
+**Security.** `engagement_versions` and `decision_log` reveal a firm's clients and activity, so they live in each firm's existing database and inherit its isolation and data residency. Backfill and monitoring use firm-scoped credentials; the API takes the firm from the session token, never from the request, and reuses existing per-engagement permissions; logs carry IDs only; everything that touches firm data runs in the firm's region. Only template data is shared, and the LLM only ever sees template content, never engagement or client data; monitoring exports counts only.
 
 ## 2. Implementation Plan
 
-Standard online-migration order: create tables, capture new changes, copy existing state, verify, then show users. Each phase ships behind a per-firm feature flag; we only add tables and hooks and never modify an engagement file, so rollback is turning the flag off.
+Each phase has a per-firm on/off switch; we only add tables and code and never modify an engagement file, so rollback is switching it off.
 
-1. **Tables.** `engagement_versions` and `decision_log` in each firm's database (a migration per firm); `template_releases` and `release_summaries` in the shared store. *Done when* migrated for the pilot firms.
-2. **Capture new changes.** Enable the engagement hook and the template-store listener; copy the versions already in the template store into `template_releases` once. This goes **before** the backfill, so changes made while it runs are not missed. *Done when* pilot firms show hook writes and `template_releases` matches the template store.
-3. **Backfill.** A background job works through each firm's engagements still marked *verifying*, recently opened ones first. It loads each one without changing it (~1 min), records its template, version and revision, and marks it verified; if a user opened or changed an engagement first, the hook already recorded its version and the job does not load it again. After 3 failed loads it is marked `error`, with an alarm. To spare users, it runs mostly off-hours, a limited number at a time, pausing if their load times rise. Size (assumed): ~150,000 engagements ≈ 3 nights at 100 at a time. *Done when* a firm's open engagements are verified or in `error`.
-4. **Check before showing.** The Pending Updates API runs but the UI stays off; we query it and reload a sample of engagements to confirm its answers.
-5. **Turn it on for users.** Pilot firms first; once they run without problems, the remaining firms in groups.
-6. **Summaries (in parallel with 3–5).** Evaluate offline on historical releases; launch with the content team approving every summary before users see it; move to sampled review once summaries are consistently approved without edits.
+1. **Tables.** Firm tables in each firm's database (a migration per firm); shared tables once. *Done when* migrated for the pilot firms.
+2. **Capture new changes.** Enable the engagement hook and the template-store listener; copy the versions already published into `template_releases` once. This goes **before** the backfill, so changes made while it runs are not missed. *Done when* pilot firms show hook writes and the version check finds nothing missing.
+3. **Backfill.** Works through each firm's *verifying* engagements, recently opened first; loads each without changing it, records template, version and revision number, marks it verified (skipping any the hook already recorded). After 3 failed loads: `error` and an alarm. Mostly off-hours, a limited number at a time, pausing if users' load times rise. Size (assumed): ~150,000 engagements ≈ 3 nights at 100 at a time. *Done when* a firm's open engagements are verified or in `error`.
+4. **API, hidden.** Build the Pending Updates API and deploy it in each region with the UI off; the spot check confirms its answers.
+5. **Turn it on.** Pilot firms first, then the rest in groups.
+6. **Summaries (in parallel with 3–5).** Evaluate on past versions; launch with the content team approving every summary; move to sampled review once they are consistently approved without edits.
 
 ## 3. Testing Strategy
 
 | Component | What we test | Passes when |
 |---|---|---|
-| Pending Updates API | Pending logic with accumulated versions (the §1 example); firm taken from the session | Correct pending list; no engagement is ever loaded; firm A never sees firm B |
+| Pending rule (built, [`implementation/`](../implementation/)) | The §1 example; walk-back and re-offers; stale backfill readings; versions published mid-review; 500 random histories | 32 tests pass: a declined version is never re-offered, none is declined unseen, an engagement never moves back |
+| Pending Updates API | Firm taken from the session | No engagement is ever loaded; firm A never sees firm B |
 | Engagement hook | Create / apply / decline, including a failing one | Our tables change only if the engagement change succeeds |
-| Backfill job | Run on a copy of a pilot firm, with forced load failures and a user applying mid-run | Every engagement ends verified or in `error`; a newer apply is never overwritten |
+| Backfill job | A copy of a pilot firm, with forced load failures and a user applying mid-run | Every engagement ends verified or in `error`; a newer apply is never overwritten |
 | Queue + release processor | The same publish message twice, or out of order | One row per version |
-| Summary generator | Citation check, plus a set of past releases graded by the content team | No invented or missing change; a prompt or model change ships only if the grade holds |
+| Summary generator | ID check, plus past versions graded by the content team | No invented or missing change; a prompt or model change ships only if the grade holds |
 
 ## 4. Evaluation & Observability
 
@@ -90,37 +83,32 @@ For each component we measure whether it does its job correctly, not only whethe
 
 | Component | Doing its job right means | How we measure it in production |
 |---|---|---|
-| Queue + release processor | No published version is missing | Reconciliation with the template store: versions missing must be zero |
-| Engagement hook, backfill and API | Every engagement shows exactly the updates it really has pending | **Drift check:** reload a sample of engagements and compare their real pending updates with what the list shows (mismatches must be zero); backfill coverage per firm; response time flat with firm size |
+| Queue + release processor | No published version is missing | Version check: missing versions must be zero |
+| Hook, backfill and API | Every engagement shows exactly the updates it really has pending | Spot check: mismatches must be zero; backfill progress per firm; list response time flat with firm size |
 | `decision_log` | Every decision is recorded | Every version change has a log entry: **each firm's decision history** |
-| Post-publish count job | Answers **how many engagements a release affects** | Per region and firm (own credentials, numbers only): engagements pending or still verifying; a missing firm = **check not running for every firm** |
+| Impact count | Answers **how many engagements a new version affects** | Per firm and region, numbers only: engagements pending or still verifying. A firm missing from the count, or with no spot check result, means **the check is not running for that firm** |
 
-**Evaluating the summaries.** Good means *complete*, *faithful* (nothing invented, meaning right), *clear* to a non-technical auditor and *neutral*; the citation check proves only completeness.
-
-- **Before release:** the graded set of past releases gates every prompt or model change (§3).
-- **In production:** at about one summary per product per week, the content team can grade them against these criteria (all at launch, then a sample); we track approvals without edits and edit reasons (omitted, invented, wrong meaning, unclear).
-- **Users:** an "accurate?" control and a "wrong summary" flag, confirmed by the content team; alarm on any confirmed error or falling approvals.
-
-**Is the feature useful:** time from publish to decision, and engagements pending for months.
+**Evaluating the summaries.** Good means *complete*, *faithful* (nothing invented, meaning right), *clear* to a non-technical auditor and *neutral*; the ID check proves only completeness. **Before release:** the graded set of past versions gates every prompt or model change. **In production:** at about one summary per product per week, the content team grades them (all at launch, then a sample); we track approvals without edits and edit reasons. **Users:** an "accurate?" control and a "wrong summary" flag, confirmed by the content team; alarm on any confirmed error. **Is the feature useful:** time from publish to decision, and engagements pending for months.
 
 ## 5. Failure Modes & Tradeoffs
 
 | Failure → effect | Detected by | Mitigation |
 |---|---|---|
-| Publish message lost → wrongly *Up to date* | Reconciliation with the template store | Queue retries; reconciliation copies the missing version |
-| Summary wrong, invented or incomplete → bad decision | Citation check (invented, omitted); content-team grading and user flags (wrong meaning) | Approved at launch; fixed once for every firm; decisions taken while the wrong revision was live are found by date, so those firms can be told |
+| Publish message lost → wrongly *Up to date* | Version check | Queue retries; the version check adds the missing version |
+| Summary wrong or incomplete → bad decision | ID check (invented, omitted); content-team grading and user flags (wrong meaning) | Approved at launch; fixed once for every firm; decisions taken while a wrong revision was live are found by date, so those firms can be told |
 | Diff too large for the LLM → no summary | *In preparation* too long | Summarize by section, or the content team writes it |
-| Firm-scoping bug → cross-firm leak | Negative tests; access logs | Firm from the session token; tables in each firm's own database |
-| Late backfill write after an apply → old version shown | Drift check | Writes carry the revision; older ones are ignored |
-| Engagement unloadable or table drift → wrong state | `error` count; drift check | Shown as `error`, never *Up to date*; fixed on next open |
+| Firm-scoping bug → cross-firm leak | Tests that try to read another firm's data; access logs | Firm from the session token; tables in each firm's own database |
+| Backfill writes an old reading after an apply | Spot check | Writes carry the revision number; older ones are ignored |
+| Engagement cannot be loaded, or our table disagrees with it | `error` count; spot check | Shown as `error`, never *Up to date*; fixed on next open |
+| **Plan B:** the engagement management system cannot share a transaction with our tables (assumption 4 fails) → a decision could be saved without us knowing | Spot check | The hook sends each change as a message after the save, retried until stored; the revision number makes late or repeated messages harmless |
 
-**Tradeoffs accepted** (what we chose over the alternative: what we gain; what we give up)
+**Tradeoffs accepted** (what we chose over the alternative: gain; cost)
 
-- **Our own table with each engagement's version over changing the engagement system so it can be read without loading:** that core system stays untouched; the table can disagree with the file (hence the drift check).
-- **Computing pending updates when the user opens the list over writing them into every affected engagement when a version is published:** a publish costs one row however many firms use the template; users learn about a new version when they open the list, not through a notification.
-- **Loading every existing engagement once at launch (the backfill) over waiting until each one is opened:** no engagement is left with an unknown version; it costs ~150,000 one-minute loads, once.
-- **Our tables inside each firm's own database over one central database for all firms:** firm isolation and data residency come from where the data lives; every firm's database needs a migration.
-- **Writing our tables in the same transaction as the user's decision over sending an event to process later:** a decision can never be missing from our tables; if our write fails, the user's apply/decline fails too.
-- **Reviewing all pending versions together over deciding each version separately:** with v4 and v5 pending, the user applies both in one click, or declines and is offered v4 alone. The cost: versions are cumulative, so if the user declines v5 and later applies v6, v5's changes come in too (the summary warns about it).
-- **Summaries written by an LLM over text generated by fixed rules per change type:** readable without knowing the template's internal structure; the LLM can be wrong, hence the citation check and human review.
-- **One summary per version over one summary per jump (e.g. v3 → v6):** each is written and reviewed once and shared by all firms; users read the changes version by version, not the net effect (*changed again* marks items changed more than once).
+- **Our own table over changing the engagement system so versions are readable without loading:** that core system stays untouched; the table can disagree with the file (hence the spot check).
+- **Computing pending when the list is opened over marking every affected engagement at publish:** a publish costs one row however many firms use the template; users learn of a new version when they look, not by notification.
+- **Loading every existing engagement once (backfill) over waiting until each is opened:** no version stays unknown; ~150,000 one-minute loads, once.
+- **Tables in each firm's database over one central database:** isolation and residency come from where the data lives; every firm's database needs a migration.
+- **Same transaction as the user's decision over an event processed later:** a decision can never be missing from our tables; if our write fails, the user's apply/decline fails too.
+- **One review for all pending versions over one decision per version:** one click in the common case; versions are cumulative, so declining v5 and later applying v6 brings v5's changes in (the review shows it).
+- **LLM summaries over fixed rules per change type:** readable without knowing the template's structure; the LLM can be wrong, hence the ID check and human review.
+- **One summary per version over one per jump (e.g. v3 → v6):** each is written and reviewed once for all firms; users read changes version by version, not the net effect (*changed again* helps).
